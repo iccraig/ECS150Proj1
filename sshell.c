@@ -6,14 +6,13 @@
 #include <stdbool.h>
 #include <sys/wait.h>
 
-
 #define CMDLINE_MAX 512
 #define ARG_MAX 16
 #define TOKEN_LENGTH_MAX 32
 #define BREAK_ARR_SIZE 4
 #define COMMAND_NUM_MAX 4       // We assume that there can be up to three pipe signs on the same command line to connect up to four commands to each other
-#define STRING_VARS_MAX 26
-
+#define ENVIR_VAR_MAX 26
+#define PWD_MAX 1000
 
 typedef struct process {
         char *cmdArray[ARG_MAX + 1];
@@ -21,55 +20,21 @@ typedef struct process {
         int retval;
         bool outRedirect;
         char *outFile;
+        int outFileFD;
         bool outCombination;
         bool pipeCombinationAfter;
 } Process;
 
-typedef struct envVar{
-        char letter;
-        char *string;
-} EnvVar;
-
-void setString(char varLetter, char* str, EnvVar* strArr) {
-        for (int i = 0; i < 26; i++) {
-                if (i == varLetter-97) {
-                        strArr[i].string = str;
-                        // printf("str string: %s\n", strArr[i].string);
-                }
-        }
+void initializeProcess(Process* proc){
+        proc->pid = 0;
+        proc->retval = 0;
+        proc->outRedirect = false;
+        proc->outFileFD = 0;
+        proc->outCombination = false;
+        proc->pipeCombinationAfter = false;
 }
 
-char* getString(char varLetter, EnvVar* strArr) {
-        for (int i = 0; i < 26; i++) {
-                // printf("I: %d, varLetter: %d\n", i, varLetter);
-                if (i == varLetter-97) {
-                        //printf("PRERETURN\n");
-                        return strArr[i].string;
-                }
-        }
-        return "";
-}
-
-void initializeVars(EnvVar* strArr) {
-        char c = 'a';
-        for (int i= 0; i < 26; i++) {
-                strArr[i].letter = c;
-                strArr[i].string = "";
-                c++;
-        }
-}
-
-bool checkIsValidVar(char varLetter) {
-        char c = 'a';
-        for (int i = 0; i < 26; i++) {
-                // printf("Char c: %d, varLetter: %d \n", c, varLetter);
-                if (c == varLetter)
-                        return true;
-                c++;
-        }
-        return false;
-}
-
+/*
 void printStruct(Process *proc){
         int i=0;
         while(proc->cmdArray[i] != NULL){
@@ -85,15 +50,21 @@ void printStruct(Process *proc){
         
 }
 
-int fillTokens(char cmdline[CMDLINE_MAX], char tokens[ARG_MAX + 1][TOKEN_LENGTH_MAX + 1], EnvVar envVarArray[STRING_VARS_MAX], bool *runCommand) {     // returns how many tokens it had (max 16)
+void printEnviVar(char envirnVariables[ENVIR_VAR_MAX][TOKEN_LENGTH_MAX + 1], char* title){
+        printf("%s:", title);
+        for(int i=0; i<ENVIR_VAR_MAX; i++){
+                printf("%d<%s>,",i, envirnVariables[i]);
+        }
+        printf("\n");
+}
+*/
+
+int fillTokens(char cmdline[CMDLINE_MAX], char tokens[ARG_MAX + 1][TOKEN_LENGTH_MAX + 1], bool *runCommand) {     // returns how many tokens it had (max 16)
         int tokenIndex = 0;
         int stringIndex = 0;
-
         bool inString = false;
         bool inQuote = false;
         char quote = '\'';
-        bool lastChar$ = false;
-
         char breaks[BREAK_ARR_SIZE] = {' ', '\t', '|', '>'};
 
         int cmdLen = strlen(cmdline);
@@ -101,15 +72,15 @@ int fillTokens(char cmdline[CMDLINE_MAX], char tokens[ARG_MAX + 1][TOKEN_LENGTH_
         for (int cmdIndex = 0; cmdIndex < cmdLen; ++cmdIndex) {
                 c = cmdline[cmdIndex];
                 if (inString) {
-                        // check if string needs to be finalize
-                        // 1. whitespace
+                        // check if string needs to be finalize 
+                        // 1. whitespace & quotes
                         // 2. redirect
                         // 3. pipe
                         if (inQuote) {
                                 if (c == quote) {
-                                inQuote = false;
+                                        inQuote = false;
                                 } else { // char is part of the string anyways
-                                tokens[tokenIndex][stringIndex++] = c;
+                                        tokens[tokenIndex][stringIndex++] = c;
                                 }
                         } else if (c == '\"' || c == '\'') {
                                 quote = c;
@@ -117,26 +88,24 @@ int fillTokens(char cmdline[CMDLINE_MAX], char tokens[ARG_MAX + 1][TOKEN_LENGTH_
                         } else {
                                 bool isBreak = false;
                                 for (int i = 0; !isBreak && i < BREAK_ARR_SIZE; ++i) {
-                                isBreak = (breaks[i] == c);
-                        }
-                        if (isBreak) {
-                                // need to close the current string
-                                tokens[tokenIndex][stringIndex] = '\0';
-                                ++tokenIndex;
-                                stringIndex = 0;
-                                inString = false;
-                                if (c == '|') {
-                                        tokens[tokenIndex][0] = '|';
-                                        tokens[tokenIndex][1] = '\0';
-                                        ++tokenIndex;
-                                } else if (c == '>') {
-                                        tokens[tokenIndex][0] = '>';
-                                        tokens[tokenIndex][1] = '\0';
-                                        ++tokenIndex;
+                                        isBreak = (breaks[i] == c);
                                 }
-                                } else {
-                                // still part of current string
-                                tokens[tokenIndex][stringIndex++] = c;
+                                if (isBreak) {  // need to close the current string
+                                        tokens[tokenIndex][stringIndex] = '\0';
+                                        ++tokenIndex;
+                                        stringIndex = 0;
+                                        inString = false;
+                                        if (c == '|') {
+                                                tokens[tokenIndex][0] = '|';
+                                                tokens[tokenIndex][1] = '\0';
+                                                ++tokenIndex;
+                                        } else if (c == '>') {
+                                                tokens[tokenIndex][0] = '>';
+                                                tokens[tokenIndex][1] = '\0';
+                                                ++tokenIndex;
+                                        }
+                                } else {  // still part of current string
+                                        tokens[tokenIndex][stringIndex++] = c;
                                 }
                         }
                 } else { // inString == false
@@ -144,7 +113,7 @@ int fillTokens(char cmdline[CMDLINE_MAX], char tokens[ARG_MAX + 1][TOKEN_LENGTH_
                                 fprintf(stderr, "Error: too many process arguments\n");
                                 *runCommand = false;
                         }
-                        // cases to check for : quote, pipe, redirect, not whitespace
+                        // cases to check for : quote, pipe, redirect, combination, environment variable, not whitespace
                         if (c == '\"' || c == '\'') {
                                 quote = c;
                                 inQuote = true;
@@ -161,20 +130,6 @@ int fillTokens(char cmdline[CMDLINE_MAX], char tokens[ARG_MAX + 1][TOKEN_LENGTH_
                                 tokens[tokenIndex][0] = '&';
                                 tokens[tokenIndex][1] = '\0';
                                 ++tokenIndex;
-                        } else if (c == '$') { 
-                                lastChar$ = true;
-                        } else if (lastChar$ == true) {
-                                // printf("token index: %d\n", tokenIndex);
-                                char *envString = getString(c, envVarArray);
-                                // printf("string: %s\n", envString);
-                                for (size_t i = 0; i < strlen(envString); i++) {
-                                        // printf("envString i = %d, i = %ld \n", envString[i], i);
-                                        tokens[tokenIndex][i]=envString[i];
-                                }
-                                tokens[tokenIndex][strlen(envString)] = '\0';
-                                ++tokenIndex;
-                                lastChar$ = false;
-                                // printf("string2: %s\n", tokens[tokenIndex]);
                         } else if (c != ' ' && c != '\t') {
                                 tokens[tokenIndex][stringIndex++] = c;
                                 inString = true;
@@ -185,22 +140,15 @@ int fillTokens(char cmdline[CMDLINE_MAX], char tokens[ARG_MAX + 1][TOKEN_LENGTH_
         if (inString) {
                 tokens[tokenIndex++][stringIndex] = '\0';
         }
-        // printf("token INdex: %d\n", tokenIndex);
         return tokenIndex;
 }
 
-int breakIntoCommands(char tokens[ARG_MAX + 1][TOKEN_LENGTH_MAX + 1], int numTokens, Process proccessArray[COMMAND_NUM_MAX], bool *runCommand){
+int breakIntoCommands(char tokens[ARG_MAX + 1][TOKEN_LENGTH_MAX + 1], int numTokens, Process processArray[COMMAND_NUM_MAX], char envirnVariables[ENVIR_VAR_MAX][TOKEN_LENGTH_MAX + 1], bool *runCommand){
         int numCommands = 0;
         char* token = NULL;
         int curr = 0;
-
         bool lastTokenPipe = false;
-
-        proccessArray[0].outRedirect = false;
-        proccessArray[0].pid = 0;
-        proccessArray[0].retval = 0;
-        proccessArray[0].outCombination = false;
-        proccessArray[0].pipeCombinationAfter = false;
+        initializeProcess(&processArray[0]);
 
         for(int i = 0; i < numTokens; i++) {
                 token = tokens[i];
@@ -210,18 +158,14 @@ int breakIntoCommands(char tokens[ARG_MAX + 1][TOKEN_LENGTH_MAX + 1], int numTok
                                 *runCommand = false;
                         }
                         // close this process
-                        proccessArray[numCommands].cmdArray[curr] = NULL;
+                        processArray[numCommands].cmdArray[curr] = NULL;
                         numCommands++;
                         curr = 0;
                         lastTokenPipe = true;
                         // initialize next process
-                        proccessArray[numCommands].outRedirect = false;
-                        proccessArray[numCommands].pid = 0;
-                        proccessArray[numCommands].retval = 0;
-                        proccessArray[numCommands].outCombination = false;
-                        proccessArray[numCommands].pipeCombinationAfter = false;
+                        initializeProcess(&processArray[numCommands]);
                 } else if(lastTokenPipe && !(strcmp(token, "&"))) {
-                        proccessArray[numCommands-1].pipeCombinationAfter = true; 
+                        processArray[numCommands-1].pipeCombinationAfter = true; 
                         lastTokenPipe = false;
                 } else if (!(strcmp(token, ">"))){
                         if(i == 0) {
@@ -229,33 +173,35 @@ int breakIntoCommands(char tokens[ARG_MAX + 1][TOKEN_LENGTH_MAX + 1], int numTok
                                 *runCommand = false;
                         } else if (i == numTokens-1) {
                                 fprintf(stderr, "Error: no output file\n");
-                                *runCommand = false;
-                        } else if (i != numTokens-2) {
-                                fprintf(stderr, "Error: mislocated output redirection\n");
-                                *runCommand = false;
-                        }
-                        proccessArray[numCommands].outRedirect = true;
-                        proccessArray[numCommands].cmdArray[curr] = NULL;
+                                *runCommand = false;     
+                        } 
+                        processArray[numCommands].outRedirect = true;
+                        processArray[numCommands].outFileFD = 0;
+                        processArray[numCommands].cmdArray[curr] = NULL;
                         curr = 0;
                         lastTokenPipe = false;
-                } else if (proccessArray[numCommands].outRedirect == true) {
+                } else if (processArray[numCommands].outRedirect == true) {
                         if (!(strcmp(token, "&"))){
-                                proccessArray[numCommands].outCombination = true;
+                                processArray[numCommands].outCombination = true;
                         } else {
-                                proccessArray[numCommands].outFile = token;
+                                processArray[numCommands].outFile = token;
                         }
                         lastTokenPipe = false;
-                } else if (proccessArray[numCommands].outCombination == true){
-                        proccessArray[numCommands].outFile = token;
+                } else if (processArray[numCommands].outCombination == true){
+                        processArray[numCommands].outFile = token;
                         lastTokenPipe = false;
                 } else {
-                        proccessArray[numCommands].cmdArray[curr++] = token;
+                        if(strlen(token) == 2 && token[0] == '$' && token[1] >= 'a' && token[1] <= 'z'){
+                                processArray[numCommands].cmdArray[curr++] = envirnVariables[token[1]-97];
+                        } else {
+                                processArray[numCommands].cmdArray[curr++] = token;
+                        }
                         lastTokenPipe = false;
                 }
         }
 
         if (curr != 0){         // we didn't close last command
-                proccessArray[numCommands].cmdArray[curr] = NULL;
+                processArray[numCommands].cmdArray[curr] = NULL;
         }
 
         return numCommands+1;
@@ -264,14 +210,16 @@ int breakIntoCommands(char tokens[ARG_MAX + 1][TOKEN_LENGTH_MAX + 1], int numTok
 int main(void) {
         char cmdline[CMDLINE_MAX];
         char tokens[ARG_MAX + 1][TOKEN_LENGTH_MAX + 1]; // extra 1 bc last one will be NULL
-        Process proccessArray[COMMAND_NUM_MAX];
-        EnvVar envVarArray[STRING_VARS_MAX];
-        initializeVars(envVarArray);
+        Process processArray[COMMAND_NUM_MAX];
+        char envirnVariables[ENVIR_VAR_MAX][TOKEN_LENGTH_MAX + 1];
         bool runCommand = true;
+
+        for(int i=0; i<ENVIR_VAR_MAX; i++){
+                envirnVariables[i][0] = '\0';
+        }
 
         while (1) {
                 char *nl;
-                // int retval;
 
                 /* Print prompt */
                 printf("sshell@ucd$ ");
@@ -299,57 +247,52 @@ int main(void) {
                 }
 
                 runCommand = true;
-                int numTokens = fillTokens(cmdline, tokens, envVarArray, &runCommand);
-                int numProcesses = breakIntoCommands(tokens, numTokens, proccessArray, &runCommand);
-
-                /*
-                for(int i=0 ; i<numTokens ; i++){
-                        printf("index = %d , [%s]\n", i, tokens[i]);
-                }
-                printf("\n");
-                */
+                int numTokens = fillTokens(cmdline, tokens, &runCommand);
+                int numProcesses = breakIntoCommands(tokens, numTokens, processArray, envirnVariables, &runCommand);           
 
                 if (!strcmp(tokens[0], "pwd")) {     // builtin command pwd
-                        char buffer[1000];
-                        getcwd(buffer, 1000);
+                        char buffer[PWD_MAX];
+                        getcwd(buffer, PWD_MAX);
                         printf("%s\n", buffer);
                         fprintf(stderr, "+ completed '%s' [0]\n", cmdline);
-                } else if(!strcmp(tokens[0], "cd")) {   // builtin command cd
+                } else if (!strcmp(tokens[0], "cd")) {   // builtin command cd
                         int ch = chdir(tokens[1]);
-                        // printf("%d \n", ch);    // 0 if successful, -1 if error
                         if (ch == -1) {
                                 fprintf(stderr, "Error: cannot cd into directory\n");
                                 ch = 1;
                         }
                         fprintf(stderr, "+ completed '%s' [%d]\n", cmdline, ch);
                 } else if (!strcmp(tokens[0], "set")) { // builtin command set
-                        // printf("SETTING");
-                        // printf("Tokens[1]: %d \n", tokens[1][0]);
-                        char envVarLet = tokens[1][0];
-                        // printf("%d", envVarLet);
-                        char *envVarStr = tokens[2];
-                        if (checkIsValidVar(envVarLet)) {
-                                setString(envVarLet, envVarStr, envVarArray);
+                        if( tokens[1] != NULL && strlen(tokens[1]) == 1 && tokens[1][0] >= 'a' && tokens[1][0] <= 'z'){
+                                if(tokens[2] != NULL) {
+                                        strcpy(envirnVariables[tokens[1][0] - 97], tokens[2]);
+                                } else {
+                                        envirnVariables[tokens[1][0] - 97][0] = '\0';
+                                }   
                         } else {
-                                printf("Error: invalid variable name\n");
+                                fprintf(stderr, "Error: invalid variable name\n");
                         }
+                        fprintf(stderr, "+ completed '%s' [0]\n", cmdline);
                 } else if (runCommand) {        // not a builtin command
-/*
-                        for(int i=0; i<numProcesses; i++){
-                                printf("process number : %d\n", i);
-                                printStruct(&proccessArray[i]);
-                        }
-*/
                         pid_t pid;
-                        int fd[COMMAND_NUM_MAX-1][2];              
+                        int fd[COMMAND_NUM_MAX-1][2]; 
+
+                        bool redirectSuccedeed = true;
+                        for (int i = 0; i < numProcesses ; ++i ){
+                                if(processArray[i].outRedirect){
+                                        processArray[i].outFileFD = open(processArray[i].outFile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                                        if (processArray[i].outFileFD < 0 ){
+                                                redirectSuccedeed = false;
+                                        }                              
+                                }
+                        }
+
                         for(int i=0; i<numProcesses; i++){
                                 if ( i < numProcesses-1 ){
                                         pipe( fd[i] );
                                 }
                                 pid = fork();
-                                if (pid == 0){
-                                        //child
-
+                                if (pid == 0){  //child
                                         // check if not first --> need to open pipe from before
                                         if ( i > 0) {
                                                 close(fd[i-1][1]);                 /* No need for write access */
@@ -361,33 +304,33 @@ int main(void) {
                                         if(i < numProcesses-1) {
                                                 close(fd[i][0]);                   /* No need for read access */
                                                 dup2(fd[i][1], STDOUT_FILENO);     /* Replace stdout with pipe */
-                                                if (proccessArray[i].pipeCombinationAfter){
+                                                if (processArray[i].pipeCombinationAfter){
                                                         dup2(fd[i][1], STDERR_FILENO);
                                                 }
                                                 close(fd[i][1]);                   /* Close now unused FD */
                                         }
                                         
-                                        if(proccessArray[i].outRedirect){
-                                                int fd_out = open(proccessArray[i].outFile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                                                dup2(fd_out, STDOUT_FILENO);
-                                                if(proccessArray[i].outCombination){
-                                                        dup2(fd_out, STDERR_FILENO);
+                                        if(processArray[i].outRedirect){
+                                                if(processArray[i].outFileFD >= 0){
+                                                        dup2(processArray[i].outFileFD, STDOUT_FILENO);
+                                                        if(processArray[i].outCombination){
+                                                                dup2(processArray[i].outFileFD, STDERR_FILENO);
+                                                        }
+                                                        close(processArray[i].outFileFD);
                                                 }
-                                                close(fd_out);
                                         }
-                                        
-                                        execvp(proccessArray[i].cmdArray[0], proccessArray[i].cmdArray);
-                                        fprintf(stderr, "Error: command not found\n");
-                                        
-                                        //perror("execvp");
+
+                                        if (redirectSuccedeed){
+                                                execvp(processArray[i].cmdArray[0], processArray[i].cmdArray);
+                                                fprintf(stderr, "Error: command not found\n");
+                                        }
                                         exit(1);
-                                } else if (pid > 0) {
-                                        // Parent 
+                                } else if (pid > 0) {   // Parent
                                         if ( i > 0 ){
                                                 close(fd[i-1][0]);
                                                 close(fd[i-1][1]);
                                         }
-                                        proccessArray[i].pid = pid;
+                                        processArray[i].pid = pid;
                                 } else {
                                         perror("fork");
                                         exit(1);
@@ -396,16 +339,19 @@ int main(void) {
 
                         for(int i=0; i<numProcesses; i++){
                                 int status;
-                                waitpid(proccessArray[i].pid, &status, 0);
-                                proccessArray[i].retval = WEXITSTATUS(status);
-                                //printf("Return status value for process: %d, return val: %d\n", i, proccessArray[i].retval);
+                                waitpid(processArray[i].pid, &status, 0);
+                                processArray[i].retval = WEXITSTATUS(status);
                         }
 
-                        fprintf(stderr, "+ completed '%s' ", cmdline);
-                        for(int i=0; i<numProcesses; i++){
-                               fprintf(stderr, "[%d]", proccessArray[i].retval);
-                        }
-                        fprintf(stderr, "\n");
+                        if(redirectSuccedeed) {
+                                fprintf(stderr, "+ completed '%s' ", cmdline);
+                                for(int i=0; i<numProcesses; i++){
+                                        fprintf(stderr, "[%d]", processArray[i].retval);
+                                }
+                                fprintf(stderr, "\n");
+                        } else {
+                                fprintf(stderr, "Error: cannot open output file\n");
+                        }   
                 } 
         }
 
